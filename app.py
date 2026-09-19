@@ -69,6 +69,8 @@ WS_BASE      = "wss://fapi.binance.com/stream?streams="
 TESTNET_KEY    = os.environ.get("TESTNET_API_KEY", "").strip()
 TESTNET_SECRET = os.environ.get("TESTNET_SECRET_KEY", "").strip()
 TESTNET_SYMBOL = os.environ.get("TESTNET_SYMBOL", "BTCUSDT").strip()
+CS_KEY         = os.environ.get("COINSWITCH_API_KEY", "").strip()
+CS_SECRET      = os.environ.get("COINSWITCH_SECRET_KEY", "").strip()
 WS_USER_BASE = "wss://fapi.binance.com/ws/"
 START_TS     = time.time()
 MAX_LOG      = 4000
@@ -198,6 +200,7 @@ def _note_weight(headers):
 
 # --------------------------------------------------------------- WebSocket soak
 testnet_state = {"ran_at": None, "report": None, "runs": 0}
+cs_state = {"ran_at": None, "report": None}
 testnet_lock = threading.Lock()
 
 
@@ -680,6 +683,17 @@ def summarise() -> dict:
         "used_weight_1m": state.get("used_weight_1m"),
         "timeline": _timeline(snapshot),
         "websocket": ws_summary(),
+        "coinswitch": (None if not cs_state["report"] else {
+            "ran_at": cs_state["ran_at"],
+            "verdict": cs_state["report"].get("verdict"),
+            "count_perpetual_pairs": cs_state["report"].get("count_perpetual_pairs"),
+            "count_instruments": cs_state["report"].get("count_instruments"),
+            "count_hft_instruments": cs_state["report"].get("count_hft_instruments"),
+            "coverage_vs_our_universe": cs_state["report"].get("coverage_vs_our_universe"),
+            "median_spread_bps": (cs_state["report"].get("liquidity") or {}).get("median_spread_bps_all_pairs"),
+            "steps": [{k: v for k, v in st.items() if k in ("step", "ok", "detail")}
+                      for st in cs_state["report"].get("steps", [])],
+        }),
         "testnet_rehearsal": (None if not testnet_state["report"] else {
             "ran_at": testnet_state["ran_at"],
             "verdict": testnet_state["report"].get("verdict"),
@@ -726,7 +740,15 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path.startswith("/testnet"):
+            if self.path.startswith("/coinswitch"):
+                with testnet_lock:
+                    if cs_state["report"] is None:
+                        import coinswitch_pairs as _cp
+                        cs_state["report"] = _cp.safe_run(key=CS_KEY, secret=CS_SECRET)
+                        cs_state["ran_at"] = datetime.now(timezone.utc).isoformat()
+                    out = cs_state["report"]
+                self._send(200, json.dumps(out, indent=1))
+            elif self.path.startswith("/testnet"):
                 with testnet_lock:
                     already = testnet_state["report"] is not None
                     if not already:
