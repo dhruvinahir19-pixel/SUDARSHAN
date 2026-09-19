@@ -109,20 +109,27 @@ def _sign(query: str, ktype: str) -> str:
     raise KeyConfigError(f"unsupported key type {ktype!r}")
 
 
-def _http(url: str, timeout: float = 15.0, extra_headers: dict | None = None):
-    """Returns (status_code, body_text, latency_ms, error_str). Never raises."""
+def _http(url: str, timeout: float = 15.0, extra_headers: dict | None = None,
+          max_bytes: int = 8_000_000):
+    """Returns (status_code, body_text, latency_ms, error_str). Never raises.
+
+    NOTE: max_bytes exists because v2 read only 4000 bytes and silently truncated
+    Binance payloads (the account object and 200-bar kline arrays are far larger),
+    which produced JSONDecodeError and disguised two working endpoints as failures.
+    Read the whole thing; truncate only when STORING it.
+    """
     t0 = time.perf_counter()
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     for k, v in (extra_headers or {}).items():
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read(4000).decode("utf-8", "replace")
+            body = r.read(max_bytes).decode("utf-8", "replace")
             return r.status, body, (time.perf_counter() - t0) * 1000, None
     except urllib.error.HTTPError as e:
         body = ""
         try:
-            body = e.read(1000).decode("utf-8", "replace")
+            body = e.read(4000).decode("utf-8", "replace")
         except Exception:
             pass
         return e.code, body, (time.perf_counter() - t0) * 1000, None
@@ -336,8 +343,12 @@ def summarise() -> dict:
             "spot_ping": g("spot_ping"),
             "signed_account": g("signed_account"),
             "signed_account_diagnosis": g("signed_account", "diagnosis"),
+            "signed_account_error": g("signed_account", "error"),
+            "signed_account_skipped": g("signed_account", "skipped"),
+            "signed_account_balance": g("signed_account", "totalWalletBalance"),
             "egress": lr.get("egress"),
             "klines_compute": lr.get("klines_compute"),
+            "klines_error": (kc0.get("error") if isinstance(kc0 := lr.get("klines_compute"), dict) else None),
         },
     }
 
