@@ -58,17 +58,41 @@ Run them for **48–72 hours**, then compare the `/status` pages.
 Files: `app.py`, `Dockerfile`, `requirements.txt`, `render.yaml`, `README.md`.
 Public repo is fine — **the app contains no secrets** (keys come from environment variables).
 
-### 3.2 Create the services
-**Option A — Blueprint (fastest):** Render dashboard → **New +** → **Blueprint** → pick the repo.
-`render.yaml` pins `region: singapore`, `plan: free`, `runtime: docker`.
+### 3.2 Create the services — two routes, pick ONE
 
-**Option B — manual:** **New +** → **Web Service** → pick repo → Language: **Docker** →
-Instance Type: **Free** → **Region: Singapore (Southeast Asia)** → Health Check Path: `/health`.
+> **Read this first — Render's terminology traps.**
+> Render has **no separate "Docker service" type**. `Docker` is a **runtime** you choose *inside* a
+> service type:
+> * `type: web` + `runtime: docker` → "a web service that builds from a Dockerfile"
+> * `type: worker` + `runtime: docker` → "a Dockerfile-based background worker"
+>
+> **Free instances exist ONLY for Web Services, Static Sites, Postgres and Key Value.** Render's docs
+> state it plainly: *"Other service types don't support Free instances."* Background workers and
+> private services are **paid-only ($7+/month)** and need a card — which breaks our ₹0 constraint.
+>
+> So: every probe here is a **Docker web service**. It is a real Docker container from our Dockerfile;
+> it simply *also* listens on `$PORT`. That port is not decoration — it gives us Render's health check,
+> the UptimeRobot keep-alive that prevents the 15-minute spin-down, and a phone-readable results page.
+> Same container. Nothing given up.
 
-> ⚠️ **The single most important click in this whole exercise is the Region dropdown.** Do not leave
-> it on the default.
+#### Route A — Blueprint / `render.yaml` (recommended: creates all three regions in one click)
 
-For the other two regions, repeat with a different name and region.
+1. Confirm `render.yaml` is in the **repo root** (next to `Dockerfile` and `app.py`).
+2. Render Dashboard → **New +** → **Blueprint**.
+3. Pick the **SUDARSHAN** repo → **Apply**.
+4. Render reads the file and creates **three** free services: `sudarshan-probe-sg` (Singapore),
+   `sudarshan-probe-fra` (Frankfurt), `sudarshan-probe-us` (Oregon, control group).
+5. Add your Binance keys afterwards if you want them: per service → **Environment** → add
+   `BINANCE_API_KEY`, `BINANCE_SECRET`, `KEY_TYPE=ed25519`.
+
+#### Route B — Manual Web Service (use if the Blueprint route refuses, e.g. a plan gate)
+
+For **each** region: **New +** → **Web Service** → pick the repo → **Language: Docker** →
+**Instance Type: Free** → **Region: Singapore / Frankfurt / Oregon** → **Health Check Path: `/health`**
+→ Create. Name them `sudarshan-probe-sg` / `-fra` / `-us`.
+
+> ⚠️ **The single most important click in this whole exercise is the Region dropdown.** Leaving it on
+> the default (Oregon) is exactly what produced your 451s — reproduced again in our sandbox.
 
 ### 3.3 Add your Binance key (optional but do it)
 Service → **Environment** → add:

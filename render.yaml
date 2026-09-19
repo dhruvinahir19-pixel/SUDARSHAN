@@ -1,22 +1,79 @@
-# Render Blueprint for the SUDARSHAN connectivity probe.
-# Deploy: push this folder to a GitHub repo, then in Render:
-#   New + -> Blueprint -> pick the repo.  Region is pinned to Singapore on purpose:
-#   the whole hypothesis is that a non-US egress avoids Binance's US geo-block.
+# render.yaml — Render Blueprint for the SUDARSHAN connectivity probe
+#
+# HOW TO DEPLOY
+#   1. This file sits in the repo ROOT (next to Dockerfile and app.py).
+#   2. Render Dashboard -> New + -> Blueprint -> pick the SUDARSHAN repo -> Apply.
+#   3. Render reads this file and creates THREE free services at once, one per region.
+#
+# WHY THREE: the whole question is "does a non-US egress avoid Binance's 451 geo-block?"
+#   Singapore  = the candidate (sources conflict, so we measure)
+#   Frankfurt  = tests whether MiCA's BNFCR system also blocks futures
+#   Oregon     = control group; proven to return 451, proves the mechanism
+#   Running all three for 72 h costs ~216 of the 750 free instance-hours per month.
+#
+# TERMINOLOGY (this is the bit that trips people up)
+#   Render has NO separate "Docker service" type. "Docker" is a RUNTIME chosen inside a
+#   service type:
+#       type: web    + runtime: docker   -> "A web service that builds from a Dockerfile"
+#       type: worker + runtime: docker   -> "A Dockerfile-based background worker"
+#   Free instances exist ONLY for Web Services, Static Sites, Postgres and Key Value.
+#   Render's docs: "Other service types don't support Free instances." Workers and private
+#   services are paid-only ($7+/month) and require a card.
+#   => Every probe below is `type: web` + `runtime: docker`: a genuine Docker container built
+#      from our Dockerfile, that ALSO listens on $PORT. That port is not decoration — it gives
+#      us Render's health check, UptimeRobot keep-alive (stops the 15-min spin-down), and a
+#      phone-readable results page. Same container, zero compromise.
+
 services:
-  - type: web                 # free tier supports WEB services only (not workers/cron)
-    name: sudarshan-probe
+  # ------------------------------------------------------------------ CANDIDATE
+  - type: web
+    name: sudarshan-probe-sg
     runtime: docker
     plan: free
-    region: singapore         # the variable under test. Do NOT leave this on oregon.
+    region: singapore
+    branch: main
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
       - key: PROBE_INTERVAL_SEC
-        value: "300"          # keep outbound volume modest (see README warnings)
+        value: "300"          # stay modest: Render may suspend free services for high OUTBOUND API volume
       - key: PROBE_SYMBOLS
         value: "BTCUSDT,ETHUSDT,SOLUSDT"
       - key: KEY_TYPE
-        value: "ed25519"
-      # Set these two in the Render dashboard, NOT in the repo:
-      #   BINANCE_API_KEY  (your ed25519 public key, hex)
-      #   BINANCE_SECRET   (your ed25519 private key, hex)
-      #   HEARTBEAT_URL    (optional: healthchecks.io ping URL)
+        value: ed25519
+      # BINANCE_API_KEY / BINANCE_SECRET / HEARTBEAT_URL are added in the Render dashboard
+      # (Environment tab), never in this file. The probe runs fine without them.
+
+  # ------------------------------------------------------------------ MiCA CHECK
+  - type: web
+    name: sudarshan-probe-fra
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PROBE_INTERVAL_SEC
+        value: "300"
+      - key: PROBE_SYMBOLS
+        value: "BTCUSDT,ETHUSDT,SOLUSDT"
+      - key: KEY_TYPE
+        value: ed25519
+
+  # ------------------------------------------------------------------ CONTROL GROUP
+  - type: web
+    name: sudarshan-probe-us
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PROBE_INTERVAL_SEC
+        value: "300"
+      - key: PROBE_SYMBOLS
+        value: "BTCUSDT,ETHUSDT,SOLUSDT"
+      - key: KEY_TYPE
+        value: ed25519
