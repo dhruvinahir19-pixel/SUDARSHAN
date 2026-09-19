@@ -9,16 +9,21 @@ WHAT THIS IS
   how often Render's free tier actually keeps the container alive.
 
 WHAT IT ANSWERS (the only questions that matter before building anything)
-  Q1  Can a Render Singapore free container reach fapi.binance.com at all?  (451 / 403 / 418?)
+  Q1  Can a Render <region> free container reach fapi.binance.com at all?  (451 / 403 / 418?)
   Q2  Do signed/authenticated calls work from a shared datacenter IP with no whitelist?
   Q3  Is the free tier actually stably alive (spin-downs, restarts, suspensions), and how
       much CPU does our real workload need on a 0.1-CPU instance?
   Q4  What is our egress IP, and does it ever change?  (decides whether whitelisting is
-      ever possible, and proves we really landed in Singapore)
+      ever possible, and proves we really landed in the intended region)
 
 WHAT IT NEVER DOES
   It never places, modifies or cancels an order. No /order path exists in this file.
   Safe to run with a live API key.
+
+DESIGN RULE (v2, learned the hard way)
+  EVERY step is independently guarded. A bad API key, a network error, or a parse failure in
+  one step can NEVER blank the whole round. The public ping is recorded first and recorded
+  always -- it needs no credentials and it is the most important datapoint we collect.
 
 ENDPOINTS (open in a browser, phone-friendly)
   /         tiny dashboard
@@ -26,11 +31,12 @@ ENDPOINTS (open in a browser, phone-friendly)
   /log      full raw log JSON
 
 ENVIRONMENT VARIABLES (all optional -> it runs with none)
-  BINANCE_API_KEY     your Ed25519 (or HMAC) key. Omit to test public paths only.
-  BINANCE_SECRET      your secret (hex private key for ed25519, or HMAC secret)
-  KEY_TYPE            "ed25519" (default) or "hmac"
-  PROBE_INTERVAL_SEC  seconds between probe rounds (default 300; see README on Render's
-                      outbound-traffic suspension clause -- do not go crazy here)
+  BINANCE_API_KEY     your key. Omit to test public paths only.
+  BINANCE_SECRET      your secret (hex private key for ed25519, or the alphanumeric one).
+  KEY_TYPE            "auto" (default) | "ed25519" | "hmac"
+                      "auto" inspects your secret: 32-byte hex -> ed25519, otherwise HMAC.
+  PROBE_INTERVAL_SEC  seconds between probe rounds (default 300; keep it modest -- Render may
+                      suspend free services that make high outbound API volume)
   PROBE_SYMBOLS       comma list, default "BTCUSDT,ETHUSDT,SOLUSDT"
   HEARTBEAT_URL       optional healthchecks.io ping URL, hit once per round
 """
@@ -45,7 +51,7 @@ PORT         = int(os.environ.get("PORT", "8080"))
 INTERVAL     = int(os.environ.get("PROBE_INTERVAL_SEC", "300"))
 API_KEY      = os.environ.get("BINANCE_API_KEY", "").strip()
 SECRET       = os.environ.get("BINANCE_SECRET", "").strip()
-KEY_TYPE     = os.environ.get("KEY_TYPE", "ed25519").strip().lower()
+KEY_TYPE     = os.environ.get("KEY_TYPE", "auto").strip().lower()
 SYMBOLS      = [s.strip().upper() for s in os.environ.get(
                   "PROBE_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
 HEARTBEAT    = os.environ.get("HEARTBEAT_URL", "").strip()
@@ -54,7 +60,7 @@ MAX_LOG      = 4000
 
 FAPI = "https://fapi.binance.com"     # USDⓈ-M futures -- the venue the strategy runs on
 SPOT = "https://api.binance.com"      # spot -- control group
-UA   = "sudarshan-probe/1.0"
+UA   = "sudarshan-probe/2.0"
 
 log: list[dict] = []
 log_lock = threading.Lock()
@@ -62,21 +68,53 @@ state = {"round": 0, "region": None, "region_checked_at": None, "egress_ips": []
 
 
 # --------------------------------------------------------------------------- signing
-def _sign(query: str) -> str:
-    if KEY_TYPE == "hmac":
+class KeyConfigError(Exception):
+    """Raised when the supplied credentials cannot be used at all."""
+
+
+def resolve_key_type() -> tuple[str, str]:
+    """Decide ed25519 vs hmac. Returns (effective_type, note). Never raises."""
+    if not SECRET:
+        return "none", "no secret set -- authenticated steps will be skipped"
+    if KEY_TYPE in ("ed25519", "hmac"):
+        note = f"forced by KEY_TYPE={KEY_TYPE}"
+        if KEY_TYPE == "ed25519":
+            try:
+                raw = bytes.fromhex(SECRET)
+                if len(raw) != 32:
+                    return "hmac", (f"KEY_TYPE=ed25519 but the secret decodes to {len(raw)} bytes "
+                                    f"(Ed25519 needs 32) -- falling back to HMAC")
+            except ValueError:
+                return "hmac", ("KEY_TYPE=ed25519 but the secret is not hexadecimal -- this is a "
+                                "CLASSIC Binance key. Auto-switched to HMAC.")
+        return KEY_TYPE, note
+    # auto
+    try:
+        raw = bytes.fromhex(SECRET)
+        if len(raw) == 32:
+            return "ed25519", f"auto-detected: {len(raw)}-byte hex secret"
+        return "hmac", f"auto-detected: secret decodes to {len(raw)} bytes, not 32 -- HMAC"
+    except ValueError:
+        return "hmac", "auto-detected: secret is not hexadecimal (classic Binance key) -- HMAC"
+
+
+def _sign(query: str, ktype: str) -> str:
+    if ktype == "hmac":
         import hmac, hashlib
         return hmac.new(SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(SECRET))
-    return sk.sign(query.encode()).hex()
+    if ktype == "ed25519":
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(SECRET))
+        return sk.sign(query.encode()).hex()
+    raise KeyConfigError(f"unsupported key type {ktype!r}")
 
 
-def _http(url: str, timeout: float = 15.0):
-    """Returns (status_code, body_text, latency_ms, error_str)."""
+def _http(url: str, timeout: float = 15.0, extra_headers: dict | None = None):
+    """Returns (status_code, body_text, latency_ms, error_str). Never raises."""
     t0 = time.perf_counter()
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    if API_KEY and ("fapi" in url or "api.binance" in url):
-        req.add_header("X-MBX-APIKEY", API_KEY)
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read(4000).decode("utf-8", "replace")
@@ -92,104 +130,143 @@ def _http(url: str, timeout: float = 15.0):
         return None, "", (time.perf_counter() - t0) * 1000, f"{type(e).__name__}: {e}"
 
 
-def signed_get(path: str, params: dict | None = None):
+def signed_get(path: str, params: dict | None = None, timeout: float = 15.0):
+    """Signed Binance GET. Raises KeyConfigError only if credentials are unusable."""
+    ktype, _ = resolve_key_type()
+    if ktype == "none":
+        raise KeyConfigError("no API key/secret configured")
     p = dict(params or {})
     p["timestamp"] = int(time.time() * 1000)
     p["recvWindow"] = 5000
     q = urllib.parse.urlencode(p)
-    q += "&signature=" + _sign(q)
-    return _http(f"{FAPI}{path}?{q}")
+    q += "&signature=" + _sign(q, ktype)
+    return _http(f"{FAPI}{path}?{q}", timeout=timeout,
+                 extra_headers={"X-MBX-APIKEY": API_KEY})
+
+
+def _safe(results: dict, name: str, fn):
+    """Run one diagnostic step. A failure is RECORDED, never allowed to kill the round."""
+    try:
+        results[name] = fn()
+    except KeyConfigError as e:
+        results[name] = {"skipped": str(e)}
+    except Exception as e:
+        results[name] = {"error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc()[-400:]}
 
 
 # --------------------------------------------------------------------------- one probe round
 def one_round() -> dict:
     r = {"ts": datetime.now(timezone.utc).isoformat(), "epoch": time.time(), "results": {}}
+    res = r["results"]
 
-    # --- Q1 public connectivity, both surfaces -------------------------------
+    # --- Q1 FIRST AND ALWAYS: public connectivity ----------------------------
+    # No credentials, no dependencies. This is the datapoint that decides everything.
     for name, url in (("futures_ping", f"{FAPI}/fapi/v1/ping"),
                       ("spot_ping",    f"{SPOT}/api/v3/ping")):
-        code, body, ms, err = _http(url)
-        r["results"][name] = {"http": code, "ms": round(ms), "err": err,
-                              "body": body[:200] if code and code != 200 else None}
+        _safe(res, name, lambda u=url: _fmt_ping(u))
+
+    # --- Q4 egress identity (early: it is the context for everything else) ----
+    _safe(res, "egress", _egress)
+
+    # --- credential sanity, reported before we use them ----------------------
+    ktype, note = resolve_key_type()
+    res["key_diagnostics"] = {"key_type_effective": ktype, "note": note,
+                              "api_key_present": bool(API_KEY), "secret_present": bool(SECRET)}
 
     # --- Q2 authenticated path ----------------------------------------------
     if API_KEY and SECRET:
-        code, body, ms, err = signed_get("/fapi/v2/account")
-        entry = {"http": code, "ms": round(ms), "err": err}
-        if code == 200:
-            try:
-                a = json.loads(body)
-                entry["ok"] = True
-                entry["canTrade"] = a.get("canTrade")
-                entry["totalWalletBalance"] = a.get("totalWalletBalance")
-                entry["note"] = "signed call accepted from this IP, no whitelist involved"
-            except Exception:
-                entry["body"] = body[:200]
-        else:
-            entry["body"] = body[:300]
-        r["results"]["signed_account"] = entry
+        _safe(res, "signed_account", _signed_account)
+    else:
+        res["signed_account"] = {"skipped": "no BINANCE_API_KEY / BINANCE_SECRET set"}
 
     # --- Q3 mimic the real workload: fetch 15m klines + compute --------------
-    compute_ms, payload_bytes, ok_syms = 0.0, 0, []
-    for sym in SYMBOLS:
-        code, body, ms, err = _http(
-            f"{FAPI}/fapi/v1/klines?symbol={sym}&interval=15m&limit=200")
-        if code == 200:
-            try:
-                t0 = time.perf_counter()
-                c = json.loads(body)
-                # what the real engine does: ATR(14) + swing structure on 15m bars
-                highs = [float(k[2]) for k in c]
-                lows  = [float(k[3]) for k in c]
-                closes= [float(k[4]) for k in c]
-                tr = [max(highs[i] - lows[i],
-                          abs(highs[i] - closes[i-1]),
-                          abs(lows[i] - closes[i-1])) for i in range(1, len(c))]
-                atr14 = sum(tr[-14:]) / 14
-                swing_hi = max(highs[-49:-1]); swing_lo = min(lows[-49:-1])
-                compute_ms += (time.perf_counter() - t0) * 1000
-                payload_bytes += len(body)
-                ok_syms.append({"sym": sym, "bars": len(c),
-                                "atr14_pct": round(atr14 / closes[-1] * 100, 3),
-                                "last": closes[-1]})
-            except Exception as e:
-                ok_syms.append({"sym": sym, "parse_error": str(e)[:80]})
-        else:
-            ok_syms.append({"sym": sym, "http": code, "err": err,
-                            "body": (body or "")[:150]})
-    r["results"]["klines_compute"] = {"symbols": ok_syms,
-                                      "compute_ms_total": round(compute_ms, 1),
-                                      "payload_kb": round(payload_bytes / 1024, 1)}
-
-    # --- Q4 egress identity, every round (cheap and it is the whole point) ---
-    code, body, ms, err = _http("https://ipinfo.io/json")
-    if code == 200:
-        try:
-            j = json.loads(body)
-            r["results"]["egress"] = {"ip": j.get("ip"), "city": j.get("city"),
-                                      "region": j.get("region"), "country": j.get("country"),
-                                      "org": j.get("org")}
-            ip = j.get("ip")
-            if ip and ip not in state["egress_ips"]:
-                state["egress_ips"].append(ip)
-                state["region"] = f'{j.get("city")}, {j.get("region")}, {j.get("country")} | {j.get("org")}'
-                state["region_checked_at"] = r["ts"]
-        except Exception as e:
-            r["results"]["egress"] = {"parse_error": str(e)[:80]}
-    else:
-        r["results"]["egress"] = {"http": code, "err": err}
+    _safe(res, "klines_compute", _klines_compute)
 
     # --- optional heartbeat (free dead-man's switch) --------------------------
     if HEARTBEAT:
-        try:
-            _http(HEARTBEAT, timeout=8)
-            r["results"]["heartbeat"] = "sent"
-        except Exception:
-            r["results"]["heartbeat"] = "failed"
+        _safe(res, "heartbeat", lambda: _ok(_http(HEARTBEAT, timeout=8)[0]))
 
     state["round"] += 1
     r["round"] = state["round"]
     return r
+
+
+def _ok(code) -> str:
+    return "sent" if code == 200 else f"http {code}"
+
+
+def _fmt_ping(url: str) -> dict:
+    code, body, ms, err = _http(url)
+    out = {"http": code, "ms": round(ms), "err": err}
+    if code is not None and code != 200:
+        out["body"] = (body or "")[:300]
+        if code == 451:
+            out["diagnosis"] = "GEO-BLOCK: this egress region is restricted by Binance"
+        elif code == 403:
+            out["diagnosis"] = "IP-level block (shared/datacenter range)"
+        elif code == 418:
+            out["diagnosis"] = "IP banned for repeated limit violations"
+        elif code == 429:
+            out["diagnosis"] = "rate limited (informational; our volume is low)"
+    return out
+
+
+def _egress() -> dict:
+    code, body, ms, err = _http("https://ipinfo.io/json")
+    if code != 200:
+        return {"http": code, "err": err}
+    j = json.loads(body)
+    ip = j.get("ip")
+    if ip and ip not in state["egress_ips"]:
+        state["egress_ips"].append(ip)
+        state["region"] = f'{j.get("city")}, {j.get("region")}, {j.get("country")} | {j.get("org")}'
+        state["region_checked_at"] = datetime.now(timezone.utc).isoformat()
+    return {"ip": ip, "city": j.get("city"), "region": j.get("region"),
+            "country": j.get("country"), "org": j.get("org"), "ms": round(ms)}
+
+
+def _signed_account() -> dict:
+    code, body, ms, err = signed_get("/fapi/v2/account")
+    entry = {"http": code, "ms": round(ms), "err": err}
+    if code == 200:
+        a = json.loads(body)
+        entry.update({"ok": True, "canTrade": a.get("canTrade"),
+                      "totalWalletBalance": a.get("totalWalletBalance"),
+                      "note": "signed call accepted from this IP; no whitelist involved"})
+    else:
+        entry["body"] = (body or "")[:300]
+        if code == 401 or "-2015" in (body or ""):
+            entry["diagnosis"] = ("key rejected -- check that the key has Futures/Reading "
+                                  "permission and that key_type matches the key style")
+    return entry
+
+
+def _klines_compute() -> dict:
+    compute_ms, payload_bytes, rows = 0.0, 0, []
+    for sym in SYMBOLS:
+        code, body, ms, err = _http(f"{FAPI}/fapi/v1/klines?symbol={sym}&interval=15m&limit=200")
+        if code != 200:
+            rows.append({"sym": sym, "http": code, "err": err, "body": (body or "")[:150]})
+            continue
+        try:
+            t0 = time.perf_counter()
+            c = json.loads(body)
+            highs  = [float(k[2]) for k in c]
+            lows   = [float(k[3]) for k in c]
+            closes = [float(k[4]) for k in c]
+            tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]),
+                      abs(lows[i] - closes[i-1])) for i in range(1, len(c))]
+            atr14 = sum(tr[-14:]) / 14
+            rows.append({"sym": sym, "bars": len(c),
+                         "atr14_pct": round(atr14 / closes[-1] * 100, 3),
+                         "last": closes[-1],
+                         "swing_hi": max(highs[-49:-1]), "swing_lo": min(lows[-49:-1])})
+            compute_ms += (time.perf_counter() - t0) * 1000
+            payload_bytes += len(body)
+        except Exception as e:
+            rows.append({"sym": sym, "parse_error": f"{type(e).__name__}: {e}"[:120]})
+    return {"symbols": rows, "compute_ms_total": round(compute_ms, 1),
+            "payload_kb": round(payload_bytes / 1024, 1)}
 
 
 # --------------------------------------------------------------------------- loop
@@ -215,26 +292,31 @@ def summarise() -> dict:
         return {"state": "no rounds yet", "seconds_since_start": round(time.time() - START_TS)}
 
     codes: dict[str, int] = {}
+    crashes = 0
     for rec in snapshot:
-        for name, res in rec.get("results", {}).items():
-            if isinstance(res, dict) and "http" in res:
-                key = f"{name}: HTTP {res['http']}" if res["http"] else f"{name}: {res.get('err','?')[:40]}"
+        if "crash" in rec:
+            crashes += 1
+        for name, r0 in rec.get("results", {}).items():
+            if isinstance(r0, dict) and "http" in r0:
+                key = (f"{name}: HTTP {r0['http']}" if r0["http"]
+                       else f"{name}: {str(r0.get('err'))[:40]}")
                 codes[key] = codes.get(key, 0) + 1
 
-    epochs = [r["epoch"] for r in snapshot if "epoch" in r]
+    epochs = [rec["epoch"] for rec in snapshot if "epoch" in rec]
     gaps, downtime = [], 0.0
     for a, b in zip(epochs, epochs[1:]):
         d = b - a
         if d > INTERVAL * 1.8:
             gaps.append({"from": datetime.fromtimestamp(a, timezone.utc).isoformat(),
-                         "gap_sec": round(d)}) 
+                         "gap_sec": round(d)})
             downtime += d - INTERVAL
     wall = max(time.time() - START_TS, 1)
     last = snapshot[-1]
+    lr = last.get("results", {})
 
-    # freshness of the most important single signal
-    def st(name):
-        return last.get("results", {}).get(name, {})
+    def g(name, field="http"):
+        v = lr.get(name, {})
+        return v.get(field) if isinstance(v, dict) else None
 
     return {
         "region_proven": state["region"],
@@ -245,15 +327,18 @@ def summarise() -> dict:
         "uptime_pct_estimate": round(100 * (wall - downtime) / wall, 2),
         "interruption_count": len(gaps),
         "interruptions": gaps[-10:],
+        "round_crashes": crashes,
         "response_code_tally": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
+        "key_diagnostics": lr.get("key_diagnostics"),
         "latest": {
-            "futures_ping": st("futures_ping").get("http"),
-            "spot_ping": st("spot_ping").get("http"),
-            "signed_account": st("signed_account").get("http"),
-            "egress": st("egress"),
-            "klines_compute": st("klines_compute"),
+            "futures_ping": g("futures_ping"),
+            "futures_ping_body": g("futures_ping", "body"),
+            "spot_ping": g("spot_ping"),
+            "signed_account": g("signed_account"),
+            "signed_account_diagnosis": g("signed_account", "diagnosis"),
+            "egress": lr.get("egress"),
+            "klines_compute": lr.get("klines_compute"),
         },
-        "keys_configured": bool(API_KEY and SECRET),
     }
 
 
@@ -278,33 +363,35 @@ class H(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": True}))
             else:
                 s = summarise()
-                up = s.get("uptime_pct_estimate", "—")
-                lp = s.get("latest", {})
-                fp = lp.get("futures_ping"); sp = lp.get("spot_ping"); sa = lp.get("signed_account")
-                eg = lp.get("egress") or {}
+                lp = s.get("latest", {}) or {}
+                kd = s.get("key_diagnostics") or {}
                 kc = lp.get("klines_compute") or {}
                 def mark(v):
                     return "✅ 200" if v == 200 else ("—" if v is None else f"❌ {v}")
+                fp = lp.get("futures_ping")
+                verdict = {200: "reachable", 451: "GEO-BLOCKED", 403: "IP-blocked",
+                           418: "IP banned", 429: "rate limited"}.get(fp, "no data yet")
                 html = f"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{{font:15px/1.5 system-ui;margin:16px;background:#0f1115;color:#e6e6e6}}
-h1{{font-size:19px}}table{{border-collapse:collapse;width:100%;max-width:640px}}
+h1{{font-size:19px}}table{{border-collapse:collapse;width:100%;max-width:660px}}
 td{{border-bottom:1px solid #2a2f3a;padding:7px 4px}}td:last-child{{text-align:right;font-weight:600}}
-.s{{color:#8b93a7;font-size:13px}}</style>
-<h1>SUDARSHAN · Render free-tier probe</h1>
+.s{{color:#8b93a7;font-size:13px}}.warn{{color:#ffb454}}</style>
+<h1>SUDARSHAN · Render probe</h1>
 <table>
 <tr><td>Region actually running in</td><td>{s.get('region_proven') or '—'}</td></tr>
 <tr><td>Egress IPs seen</td><td>{len(s.get('distinct_egress_ips') or [])}</td></tr>
-<tr><td>Futures API reachable</td><td>{mark(fp)}</td></tr>
-<tr><td>Spot API reachable</td><td>{mark(sp)}</td></tr>
-<tr><td>Authenticated (signed) call</td><td>{mark(sa)}</td></tr>
+<tr><td>Binance futures verdict</td><td class="{'warn' if fp!=200 else ''}">{verdict}</td></tr>
+<tr><td>Futures API {'' if fp else ''}</td><td>{mark(fp)}</td></tr>
+<tr><td>Spot API</td><td>{mark(lp.get('spot_ping'))}</td></tr>
+<tr><td>Authenticated (signed) call</td><td>{mark(lp.get('signed_account'))}</td></tr>
+<tr><td>Key type in use</td><td>{kd.get('key_type_effective','—')}</td></tr>
 <tr><td>Klines + compute</td><td>{kc.get('payload_kb','—')} KB in {kc.get('compute_ms_total','—')} ms</td></tr>
 <tr><td>Rounds completed</td><td>{s.get('rounds_completed','—')}</td></tr>
-<tr><td>Uptime estimate</td><td>{up}%</td></tr>
-<tr><td>Interruptions (spin-downs/restarts)</td><td>{s.get('interruption_count','—')}</td></tr>
-<tr><td>Keys configured</td><td>{'yes' if s.get('keys_configured') else 'no (public only)'}</td></tr>
+<tr><td>Uptime estimate</td><td>{s.get('uptime_pct_estimate','—')}%</td></tr>
+<tr><td>Interruptions</td><td>{s.get('interruption_count','—')}</td></tr>
 </table>
-<p class="s">Auto-refreshes every 30s. Raw: <a style="color:#6cf" href="/status">/status</a> ·
-<a style="color:#6cf" href="/log">/log</a></p>
+<p class="s">{kd.get('note','')}<br>Auto-refreshes every 30s. Raw:
+<a style="color:#6cf" href="/status">/status</a> · <a style="color:#6cf" href="/log">/log</a></p>
 <script>setTimeout(()=>location.reload(),30000)</script>"""
                 self._send(200, html, "text/html; charset=utf-8")
         except Exception as e:
@@ -315,7 +402,8 @@ td{{border-bottom:1px solid #2a2f3a;padding:7px 4px}}td:last-child{{text-align:r
 
 
 if __name__ == "__main__":
+    ktype, note = resolve_key_type()
     threading.Thread(target=probe_loop, daemon=True).start()
     print(f"probe up on 0.0.0.0:{PORT} | interval={INTERVAL}s | symbols={SYMBOLS} | "
-          f"keys={'yes' if API_KEY else 'no'}", flush=True)
+          f"key_type={ktype} ({note})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
