@@ -289,6 +289,21 @@ WS_CANDIDATES = [
     ("F fstream + Origin",
         "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade",
         {"Origin": "https://www.binance.com", "User-Agent": "Mozilla/5.0"}),
+    # rule out the cheap explanations for the fapi 403: a browser-ish identity, and Origin
+    ("G fapi /stream + UA",
+        "wss://fapi.binance.com/stream?streams=btcusdt@aggTrade",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}),
+    ("H fapi /stream + UA + Origin",
+        "wss://fapi.binance.com/stream?streams=btcusdt@aggTrade",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+         "Origin": "https://www.binance.com"}),
+    ("I fapi /ws + UA",
+        "wss://fapi.binance.com/ws/btcusdt@aggTrade",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}),
+    ("J fstream :443 explicit",
+        "wss://fstream.binance.com:443/stream?streams=btcusdt@aggTrade", {}),
 ]
 ws_matrix = {"tested_at": None, "results": [], "winner": None}
 
@@ -337,6 +352,13 @@ def ws_matrix_test():
     ws_matrix["tested_at"] = datetime.now(timezone.utc).isoformat()
     ws_matrix["results"] = out
     ws_matrix["winner"] = winner
+    ws_matrix["runs"] = ws_matrix.get("runs", 0) + 1
+    ws_matrix["winners_seen"] = ws_matrix.get("winners_seen", 0) + (1 if winner else 0)
+    ws_matrix.setdefault("history", []).append(
+        {"ts": ws_matrix["tested_at"], "winner": winner,
+         "summary": " ".join(f"{r['candidate'].split()[0]}:{'OK' if r.get('ok') else 'X'}"
+                             for r in out)})
+    del ws_matrix["history"][:-60]
     _ws_event("matrix", f"winner={winner or 'NONE'}  " +
               " | ".join(f"{r['candidate']}:{'OK' if r.get('ok') else 'FAIL'}" for r in out))
     return ws_matrix
@@ -423,6 +445,10 @@ def ws_soak_loop():
             time.sleep(15)
         with ws_lock:
             ws_state["attempt_sec_total"] += time.time() - t_attempt
+        if not ws_matrix["winner"]:
+            # no working endpoint yet -> retest, so we can tell "permanently blocked"
+            # apart from "transiently blocked"
+            ws_matrix_test()
         time.sleep(2)
 
 
@@ -638,7 +664,10 @@ def summarise() -> dict:
         "websocket": ws_summary(),
         "ws_endpoint_matrix": {"tested_at": ws_matrix["tested_at"],
                                "winner": ws_matrix["winner"],
-                               "results": ws_matrix["results"]},
+                               "runs": ws_matrix.get("runs"),
+                               "winners_seen": ws_matrix.get("winners_seen"),
+                               "results": ws_matrix["results"],
+                               "history": ws_matrix.get("history", [])[-12:]},
         "latest": {
             "futures_ping": g("futures_ping"),
             "futures_ping_body": g("futures_ping", "body"),
