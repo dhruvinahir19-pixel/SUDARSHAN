@@ -278,6 +278,70 @@ def listenkey_test():
     return out
 
 
+WS_CANDIDATES = [
+    ("A fstream /stream",   "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade", {}),
+    ("B fstream /ws",       "wss://fstream.binance.com/ws/btcusdt@aggTrade", {}),
+    ("C fapi /ws",          "wss://fapi.binance.com/ws/btcusdt@aggTrade", {}),
+    ("D fapi /stream",      "wss://fapi.binance.com/stream?streams=btcusdt@aggTrade", {}),
+    ("E fstream + browser UA",
+        "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade",
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}),
+    ("F fstream + Origin",
+        "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade",
+        {"Origin": "https://www.binance.com", "User-Agent": "Mozilla/5.0"}),
+]
+ws_matrix = {"tested_at": None, "results": [], "winner": None}
+
+
+def ws_matrix_test():
+    """Try every plausible Binance futures WS endpoint and report which handshake succeeds.
+
+    Context: from Render Singapore, fapi.binance.com/stream returned 403 from a CloudFront
+    edge (x-amz-cf-pop SIN2-P5). Binance serves futures market streams from a DIFFERENT host
+    (fstream.binance.com) -- so the REST host being blocked says nothing about the stream host.
+    This tests them all instead of guessing.
+    """
+    try:
+        import websocket
+    except ImportError:
+        return {"error": "websocket-client not installed"}
+    out = []
+    winner = None
+    for name, url, hdrs in WS_CANDIDATES:
+        row = {"candidate": name, "url": url[:58], "headers": list(hdrs)}
+        try:
+            t0 = time.perf_counter()
+            kw = {}
+            if hdrs:
+                kw["header"] = [f"{k}: {v}" for k, v in hdrs.items()]
+            ws = websocket.create_connection(url, timeout=10, **kw)
+            ws.settimeout(4)
+            row["handshake_ms"] = round((time.perf_counter() - t0) * 1000)
+            try:
+                msg = ws.recv()
+                row["first_msg"] = (msg or "")[:110]
+                row["ok"] = True
+            except Exception as e:
+                row["ok"] = False
+                row["recv_error"] = f"{type(e).__name__}: {str(e)[:90]}"
+            try:
+                ws.close()
+            except Exception:
+                pass
+            if row.get("ok") and not winner:
+                winner = url
+        except Exception as e:
+            row["ok"] = False
+            row["handshake_error"] = f"{type(e).__name__}: {str(e)[:110]}"
+        out.append(row)
+    ws_matrix["tested_at"] = datetime.now(timezone.utc).isoformat()
+    ws_matrix["results"] = out
+    ws_matrix["winner"] = winner
+    _ws_event("matrix", f"winner={winner or 'NONE'}  " +
+              " | ".join(f"{r['candidate']}:{'OK' if r.get('ok') else 'FAIL'}" for r in out))
+    return ws_matrix
+
+
 def ws_soak_loop():
     """Hold a Binance market-data WebSocket open continuously and record how it behaves.
 
@@ -293,8 +357,13 @@ def ws_soak_loop():
     except ImportError:
         _ws_event("fatal", "websocket-client not installed")
         return
-    url = WS_BASE + ",".join(WS_STREAMS)
     _ws_event("start", f"{len(WS_STREAMS)} streams, soak {WS_SOAK_SEC}s")
+    ws_matrix_test()
+    url = ws_matrix["winner"] or (WS_BASE + ",".join(WS_STREAMS))
+    if ws_matrix["winner"]:
+        _ws_event("using_winner", ws_matrix["winner"])
+    else:
+        _ws_event("no_winner", "every candidate failed; falling back to default host for retries")
     first = True
     while True:
         t_attempt = time.time()
@@ -567,6 +636,9 @@ def summarise() -> dict:
         "used_weight_1m": state.get("used_weight_1m"),
         "timeline": _timeline(snapshot),
         "websocket": ws_summary(),
+        "ws_endpoint_matrix": {"tested_at": ws_matrix["tested_at"],
+                               "winner": ws_matrix["winner"],
+                               "results": ws_matrix["results"]},
         "latest": {
             "futures_ping": g("futures_ping"),
             "futures_ping_body": g("futures_ping", "body"),
