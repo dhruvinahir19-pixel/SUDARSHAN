@@ -55,6 +55,16 @@ KEY_TYPE     = os.environ.get("KEY_TYPE", "auto").strip().lower()
 SYMBOLS      = [s.strip().upper() for s in os.environ.get(
                   "PROBE_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
 HEARTBEAT    = os.environ.get("HEARTBEAT_URL", "").strip()
+
+# --- WebSocket soak (the piece R1/R2 actually depend on) --------------------
+WS_ENABLED   = os.environ.get("WS_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+WS_SOAK_SEC  = int(os.environ.get("WS_SOAK_SEC", "600"))    # hold each connection this long
+WS_STALL_SEC = int(os.environ.get("WS_STALL_SEC", "90"))     # silent connection => dead
+WS_STREAMS   = [x.strip() for x in os.environ.get(
+                 "WS_STREAMS", "btcusdt@aggTrade,ethusdt@aggTrade,btcusdt@kline_15m"
+               ).split(",") if x.strip()]
+WS_BASE      = "wss://fapi.binance.com/stream?streams="
+WS_USER_BASE = "wss://fapi.binance.com/ws/"
 START_TS     = time.time()
 MAX_LOG      = 4000
 
@@ -125,8 +135,10 @@ def _http(url: str, timeout: float = 15.0, extra_headers: dict | None = None,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read(max_bytes).decode("utf-8", "replace")
+            _note_weight(r.headers)
             return r.status, body, (time.perf_counter() - t0) * 1000, None
     except urllib.error.HTTPError as e:
+        _note_weight(getattr(e, "headers", None))
         body = ""
         try:
             body = e.read(4000).decode("utf-8", "replace")
@@ -161,6 +173,201 @@ def _safe(results: dict, name: str, fn):
         results[name] = {"error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc()[-400:]}
 
 
+# --------------------------------------------------------------- rate-limit weight
+def _note_weight(headers):
+    """Binance reports per-IP used weight. On a SHARED Render egress this reveals the
+    neighbours' load, not just ours -- a direct measurement of the shared-IP hazard."""
+    if not headers:
+        return
+    try:
+        w = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+        if w is not None:
+            state["used_weight_1m"] = int(w)
+            state["weight_seen_at"] = datetime.now(timezone.utc).isoformat()
+        ra = headers.get("Retry-After") or headers.get("retry-after")
+        if ra is not None:
+            state["last_retry_after"] = ra
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------- WebSocket soak
+ws_lock = threading.Lock()
+ws_state = {
+    "enabled": WS_ENABLED, "streams": WS_STREAMS, "soak_sec": WS_SOAK_SEC,
+    "connects": 0, "reconnects": 0, "messages": 0,
+    "connected_sec_total": 0.0, "attempt_sec_total": 0.0,
+    "max_gap_sec": 0.0, "last_hold_sec": None, "msgs_last_hold": None,
+    "last_connect_ms": None, "last_error": None, "last_msg_age_sec": None,
+    "listen_key": None, "listen_key_result": None, "user_stream": None,
+    "events": [],
+}
+
+
+def _ws_event(kind, detail=""):
+    with ws_lock:
+        ws_state["events"].append({"ts": datetime.now(timezone.utc).isoformat(),
+                                   "kind": kind, "detail": str(detail)[:220]})
+        del ws_state["events"][:-40]
+
+
+def _post(url, extra_headers=None, timeout=15.0, data=b""):
+    """Tiny POST helper. Used ONLY for /fapi/v1/listenKey -- never for orders."""
+    t0 = time.perf_counter()
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"User-Agent": UA, **(extra_headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            _note_weight(r.headers)
+            return r.status, r.read(4000).decode("utf-8", "replace"), (time.perf_counter() - t0) * 1000, None
+    except urllib.error.HTTPError as e:
+        try:
+            b = e.read(4000).decode("utf-8", "replace")
+        except Exception:
+            b = ""
+        return e.code, b, (time.perf_counter() - t0) * 1000, None
+    except Exception as e:
+        return None, "", (time.perf_counter() - t0) * 1000, f"{type(e).__name__}: {e}"
+
+
+def listenkey_test():
+    """Create a user-data listenKey and connect to it briefly.
+
+    This is the transport behind every 'order filled / stop triggered' notification the
+    Telegram bot depends on. POST /fapi/v1/listenKey needs only the API-key header, not a
+    signature -- and it is NOT an order path: it creates a stream token, nothing more.
+    """
+    if not API_KEY:
+        return {"skipped": "no BINANCE_API_KEY set"}
+    code, body, ms, err = _post(f"{FAPI}/fapi/v1/listenKey",
+                                extra_headers={"X-MBX-APIKEY": API_KEY})
+    out = {"create_http": code, "create_ms": round(ms), "err": err}
+    if code != 200:
+        out["body"] = (body or "")[:200]
+        return out
+    key = json.loads(body).get("listenKey")
+    out["listen_key_len"] = len(key or "")
+    with ws_lock:
+        ws_state["listen_key_result"] = {"created": True, "http": code}
+    try:
+        import websocket
+        t0 = time.perf_counter()
+        w = websocket.create_connection(WS_USER_BASE + key, timeout=12)
+        w.settimeout(2.0)
+        out["user_stream_connect_ms"] = round((time.perf_counter() - t0) * 1000)
+        held, n = 0, 0
+        t_start = time.time()
+        while time.time() - t_start < 20:
+            try:
+                if w.recv():
+                    n += 1
+            except websocket.WebSocketTimeoutException:
+                continue
+        out["user_stream_held_sec"] = round(time.time() - t_start)
+        out["user_stream_msgs"] = n
+        try:
+            w.close()
+        except Exception:
+            pass
+        out["note"] = ("user-data stream connected. Zero messages is EXPECTED: it only "
+                       "emits events when an order/position on this account changes.")
+    except Exception as e:
+        out["user_stream_error"] = f"{type(e).__name__}: {e}"
+    with ws_lock:
+        ws_state["user_stream"] = out
+    return out
+
+
+def ws_soak_loop():
+    """Hold a Binance market-data WebSocket open continuously and record how it behaves.
+
+    This is the load-bearing test. If WS survives on Render's Singapore free tier, the real
+    engine can be event-driven (low REST volume => stays clear of the suspension clause) and
+    notifications work. If WS is reset by the proxy, the whole hybrid design changes.
+    """
+    if not WS_ENABLED:
+        _ws_event("disabled", "WS_ENABLED=0")
+        return
+    try:
+        import websocket
+    except ImportError:
+        _ws_event("fatal", "websocket-client not installed")
+        return
+    url = WS_BASE + ",".join(WS_STREAMS)
+    _ws_event("start", f"{len(WS_STREAMS)} streams, soak {WS_SOAK_SEC}s")
+    first = True
+    while True:
+        t_attempt = time.time()
+        _ws_event("connecting", url[:140])
+        try:
+            t0 = time.perf_counter()
+            ws = websocket.create_connection(url, timeout=12)
+            connect_ms = (time.perf_counter() - t0) * 1000
+            ws.settimeout(2.0)
+            with ws_lock:
+                ws_state["connects"] += 1
+                if not first:
+                    ws_state["reconnects"] += 1
+                ws_state["last_connect_ms"] = round(connect_ms)
+            _ws_event("connected", f"{connect_ms:.0f} ms")
+            first = False
+
+            t_start = t_last = time.time()
+            n = 0
+            while time.time() - t_start < WS_SOAK_SEC:
+                try:
+                    msg = ws.recv()
+                    now = time.time()
+                    if msg:
+                        n += 1
+                        gap = now - t_last
+                        with ws_lock:
+                            ws_state["messages"] += 1
+                            if gap > ws_state["max_gap_sec"]:
+                                ws_state["max_gap_sec"] = round(gap, 2)
+                            ws_state["last_msg_age_sec"] = 0.0
+                        t_last = now
+                except websocket.WebSocketTimeoutException:
+                    idle = time.time() - t_last
+                    with ws_lock:
+                        ws_state["last_msg_age_sec"] = round(idle, 1)
+                    if idle > WS_STALL_SEC:
+                        _ws_event("stall", f"no data for {idle:.0f}s")
+                        break
+                except Exception as e:
+                    _ws_event("recv_error", f"{type(e).__name__}: {e}")
+                    break
+            held = time.time() - t_start
+            with ws_lock:
+                ws_state["connected_sec_total"] += held
+                ws_state["last_hold_sec"] = round(held)
+                ws_state["msgs_last_hold"] = n
+            try:
+                ws.close()
+            except Exception:
+                pass
+            _ws_event("closed", f"held {held:.0f}s, {n} msgs")
+        except Exception as e:
+            with ws_lock:
+                ws_state["last_error"] = f"{type(e).__name__}: {e}"
+            _ws_event("connect_failed", ws_state["last_error"])
+            time.sleep(15)
+        with ws_lock:
+            ws_state["attempt_sec_total"] += time.time() - t_attempt
+        time.sleep(2)
+
+
+def ws_summary():
+    with ws_lock:
+        d = dict(ws_state)
+        d["events"] = ws_state["events"][-15:]
+    held = d["connected_sec_total"]
+    att = d["attempt_sec_total"]
+    d["ws_availability_pct"] = round(100 * held / att, 2) if att > 0 else None
+    d["streams"] = len(d["streams"])
+    return d
+
+
 # --------------------------------------------------------------------------- one probe round
 def one_round() -> dict:
     r = {"ts": datetime.now(timezone.utc).isoformat(), "epoch": time.time(), "results": {}}
@@ -193,8 +400,15 @@ def one_round() -> dict:
     if HEARTBEAT:
         _safe(res, "heartbeat", lambda: _ok(_http(HEARTBEAT, timeout=8)[0]))
 
+    r["weight_1m"] = state.get("used_weight_1m")
+    r["ws_connects"] = ws_state.get("connects")
+    r["ws_messages"] = ws_state.get("messages")
+    r["ws_reconnects"] = ws_state.get("reconnects")
+
     state["round"] += 1
     r["round"] = state["round"]
+    if state["round"] % max(1, int(3600 / max(INTERVAL, 1))) == 1:
+        _safe(res, "listenkey", listenkey_test)
     return r
 
 
@@ -292,6 +506,19 @@ def probe_loop():
         time.sleep(max(5, INTERVAL - (time.time() - t0)))
 
 
+def _timeline(snapshot, every=None, cap=120):
+    """Compact per-round history so a 1-2 hour soak is readable at a glance."""
+    def code(rec, name):
+        v = rec.get("results", {}).get(name, {})
+        return v.get("http") if isinstance(v, dict) else None
+    rows = [{"t": rec["ts"][11:19], "fut": code(rec, "futures_ping"),
+             "spot": code(rec, "spot_ping"), "signed": code(rec, "signed_account"),
+             "w": rec.get("weight_1m"), "ws_msgs": rec.get("ws_messages"),
+             "ws_rc": rec.get("ws_reconnects")}
+            for rec in snapshot[-cap:]]
+    return rows
+
+
 def summarise() -> dict:
     with log_lock:
         snapshot = list(log)
@@ -337,6 +564,9 @@ def summarise() -> dict:
         "round_crashes": crashes,
         "response_code_tally": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
         "key_diagnostics": lr.get("key_diagnostics"),
+        "used_weight_1m": state.get("used_weight_1m"),
+        "timeline": _timeline(snapshot),
+        "websocket": ws_summary(),
         "latest": {
             "futures_ping": g("futures_ping"),
             "futures_ping_body": g("futures_ping", "body"),
@@ -377,6 +607,7 @@ class H(BaseHTTPRequestHandler):
                 lp = s.get("latest", {}) or {}
                 kd = s.get("key_diagnostics") or {}
                 kc = lp.get("klines_compute") or {}
+                ws = s.get("websocket") or {}
                 def mark(v):
                     return "✅ 200" if v == 200 else ("—" if v is None else f"❌ {v}")
                 fp = lp.get("futures_ping")
@@ -397,6 +628,10 @@ td{{border-bottom:1px solid #2a2f3a;padding:7px 4px}}td:last-child{{text-align:r
 <tr><td>Authenticated (signed) call</td><td>{mark(lp.get('signed_account'))}</td></tr>
 <tr><td>Key type in use</td><td>{kd.get('key_type_effective','—')}</td></tr>
 <tr><td>Klines + compute</td><td>{kc.get('payload_kb','—')} KB in {kc.get('compute_ms_total','—')} ms</td></tr>
+<tr><td>WebSocket (market streams)</td><td>{ws.get('messages','—')} msgs · {ws.get('reconnects','—')} reconnects</td></tr>
+<tr><td>WS availability</td><td>{ws.get('ws_availability_pct','—')}%</td></tr>
+<tr><td>WS last hold / connect</td><td>{ws.get('last_hold_sec','—')}s / {ws.get('last_connect_ms','—')} ms</td></tr>
+<tr><td>REST weight used (1m, per IP)</td><td>{s.get('used_weight_1m','—')} / 2400</td></tr>
 <tr><td>Rounds completed</td><td>{s.get('rounds_completed','—')}</td></tr>
 <tr><td>Uptime estimate</td><td>{s.get('uptime_pct_estimate','—')}%</td></tr>
 <tr><td>Interruptions</td><td>{s.get('interruption_count','—')}</td></tr>
@@ -415,6 +650,7 @@ td{{border-bottom:1px solid #2a2f3a;padding:7px 4px}}td:last-child{{text-align:r
 if __name__ == "__main__":
     ktype, note = resolve_key_type()
     threading.Thread(target=probe_loop, daemon=True).start()
+    threading.Thread(target=ws_soak_loop, daemon=True).start()
     print(f"probe up on 0.0.0.0:{PORT} | interval={INTERVAL}s | symbols={SYMBOLS} | "
           f"key_type={ktype} ({note})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
