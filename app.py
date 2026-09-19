@@ -66,6 +66,9 @@ WS_STREAMS   = [x.strip() for x in os.environ.get(
                  "WS_STREAMS", "btcusdt@aggTrade,ethusdt@aggTrade,btcusdt@kline_15m"
                ).split(",") if x.strip()]
 WS_BASE      = "wss://fapi.binance.com/stream?streams="
+TESTNET_KEY    = os.environ.get("TESTNET_API_KEY", "").strip()
+TESTNET_SECRET = os.environ.get("TESTNET_SECRET_KEY", "").strip()
+TESTNET_SYMBOL = os.environ.get("TESTNET_SYMBOL", "BTCUSDT").strip()
 WS_USER_BASE = "wss://fapi.binance.com/ws/"
 START_TS     = time.time()
 MAX_LOG      = 4000
@@ -194,6 +197,10 @@ def _note_weight(headers):
 
 
 # --------------------------------------------------------------- WebSocket soak
+testnet_state = {"ran_at": None, "report": None, "runs": 0}
+testnet_lock = threading.Lock()
+
+
 ws_lock = threading.Lock()
 ws_state = {
     "enabled": WS_ENABLED, "streams": WS_STREAMS, "soak_sec": WS_SOAK_SEC,
@@ -673,6 +680,16 @@ def summarise() -> dict:
         "used_weight_1m": state.get("used_weight_1m"),
         "timeline": _timeline(snapshot),
         "websocket": ws_summary(),
+        "testnet_rehearsal": (None if not testnet_state["report"] else {
+            "ran_at": testnet_state["ran_at"],
+            "verdict": testnet_state["report"].get("verdict"),
+            "host": testnet_state["report"].get("host"),
+            "reachability": testnet_state["report"].get("reachability"),
+            "conditional_orders": testnet_state["report"].get("conditional_orders"),
+            "legacy_path": testnet_state["report"].get("legacy_path"),
+            "steps": [{k: v for k, v in st.items() if k in ("step", "ok", "detail")}
+                      for st in testnet_state["report"].get("steps", [])],
+        }),
         "ws_endpoint_matrix": {"tested_at": ws_matrix["tested_at"],
                                "winner": ws_matrix["winner"],
                                "runs": ws_matrix.get("runs"),
@@ -709,7 +726,18 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path.startswith("/status"):
+            if self.path.startswith("/testnet"):
+                with testnet_lock:
+                    already = testnet_state["report"] is not None
+                    if not already:
+                        import testnet as _tn
+                        testnet_state["report"] = _tn.safe_run(
+                            key=TESTNET_KEY, secret=TESTNET_SECRET, symbol=TESTNET_SYMBOL)
+                        testnet_state["ran_at"] = datetime.now(timezone.utc).isoformat()
+                        testnet_state["runs"] += 1
+                    out = testnet_state["report"]
+                self._send(200, json.dumps(out, indent=1))
+            elif self.path.startswith("/status"):
                 self._send(200, json.dumps(summarise(), indent=2))
             elif self.path.startswith("/log"):
                 with log_lock:
