@@ -60,6 +60,8 @@ HEARTBEAT    = os.environ.get("HEARTBEAT_URL", "").strip()
 WS_ENABLED   = os.environ.get("WS_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 WS_SOAK_SEC  = int(os.environ.get("WS_SOAK_SEC", "600"))    # hold each connection this long
 WS_STALL_SEC = int(os.environ.get("WS_STALL_SEC", "90"))     # silent connection => dead
+MATRIX_EVERY = int(os.environ.get("MATRIX_RETEST_SEC", "1800"))  # re-test cadence once blocked
+WS_IDLE_SLEEP = int(os.environ.get("WS_IDLE_SLEEP_SEC", "60"))   # idle cadence when nothing works
 WS_STREAMS   = [x.strip() for x in os.environ.get(
                  "WS_STREAMS", "btcusdt@aggTrade,ethusdt@aggTrade,btcusdt@kline_15m"
                ).split(",") if x.strip()]
@@ -350,6 +352,9 @@ def ws_matrix_test():
             row["handshake_error"] = f"{type(e).__name__}: {str(e)[:110]}"
         out.append(row)
     ws_matrix["tested_at"] = datetime.now(timezone.utc).isoformat()
+    ws_matrix["last_test_epoch"] = time.time()
+    ws_matrix["blocked_confirmed"] = (ws_matrix.get("runs", 0) >= 3
+                                      and ws_matrix.get("winners_seen", 0) == 0)
     ws_matrix["results"] = out
     ws_matrix["winner"] = winner
     ws_matrix["runs"] = ws_matrix.get("runs", 0) + 1
@@ -446,10 +451,16 @@ def ws_soak_loop():
         with ws_lock:
             ws_state["attempt_sec_total"] += time.time() - t_attempt
         if not ws_matrix["winner"]:
-            # no working endpoint yet -> retest, so we can tell "permanently blocked"
-            # apart from "transiently blocked"
-            ws_matrix_test()
-        time.sleep(2)
+            # Nothing works. Re-test only on a slow cadence: the earlier 40-second loop
+            # fired ~900 handshake attempts/hour at a CloudFront-WAF endpoint, which is
+            # both pointless (23 consecutive all-fail runs) and a risk to the reputation
+            # of the SAME shared IP our REST calls depend on. Evidence is already
+            # conclusive; we now sample slowly to detect a genuine recovery.
+            if time.time() - (ws_matrix.get("last_test_epoch") or 0) >= MATRIX_EVERY:
+                ws_matrix_test()
+            time.sleep(WS_IDLE_SLEEP)
+        else:
+            time.sleep(2)
 
 
 def ws_summary():
@@ -666,6 +677,8 @@ def summarise() -> dict:
                                "winner": ws_matrix["winner"],
                                "runs": ws_matrix.get("runs"),
                                "winners_seen": ws_matrix.get("winners_seen"),
+                               "blocked_confirmed": ws_matrix.get("blocked_confirmed"),
+                               "retest_every_sec": MATRIX_EVERY,
                                "results": ws_matrix["results"],
                                "history": ws_matrix.get("history", [])[-12:]},
         "latest": {
