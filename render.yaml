@@ -1,0 +1,22 @@
+# Render Blueprint for the SUDARSHAN connectivity probe.
+# Deploy: push this folder to a GitHub repo, then in Render:
+#   New + -> Blueprint -> pick the repo.  Region is pinned to Singapore on purpose:
+#   the whole hypothesis is that a non-US egress avoids Binance's US geo-block.
+services:
+  - type: web                 # free tier supports WEB services only (not workers/cron)
+    name: sudarshan-probe
+    runtime: docker
+    plan: free
+    region: singapore         # the variable under test. Do NOT leave this on oregon.
+    healthCheckPath: /health
+    envVars:
+      - key: PROBE_INTERVAL_SEC
+        value: "300"          # keep outbound volume modest (see README warnings)
+      - key: PROBE_SYMBOLS
+        value: "BTCUSDT,ETHUSDT,SOLUSDT"
+      - key: KEY_TYPE
+        value: "ed25519"
+      # Set these two in the Render dashboard, NOT in the repo:
+      #   BINANCE_API_KEY  (your ed25519 public key, hex)
+      #   BINANCE_SECRET   (your ed25519 private key, hex)
+      #   HEARTBEAT_URL    (optional: healthchecks.io ping URL)
