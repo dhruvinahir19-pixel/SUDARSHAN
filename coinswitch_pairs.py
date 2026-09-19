@@ -58,7 +58,8 @@ BASE_Q      = "https://coinswitch.co"                 # from the official api-su
 FUTURES     = "/trade/api/v2/futures"
 HFT_HOST    = "https://dma.coinswitch.co"
 UA          = "sudarshan-pairs/1.0"
-OUR_TRADES  = [Path("output/year2026/trades_pick15.csv")]
+_ROOT       = Path(__file__).resolve().parent.parent      # workspace root, not cwd
+OUR_TRADES  = [_ROOT / "output/year2026/trades_pick15.csv"]
 OUT_DIR     = Path("output/broker_audit")
 
 
@@ -144,7 +145,9 @@ def run(key: str = "", secret: str = "") -> dict:
 
     # ---- 0. clock (public endpoint, tells us whether our epoch is sane) ----
     try:
-        with urllib.request.urlopen(BASE_Q + "/trade/api/v2/time", timeout=15) as r:
+        _rq = urllib.request.Request(BASE_Q + "/trade/api/v2/time",
+                                     headers={"User-Agent": UA})
+        with urllib.request.urlopen(_rq, timeout=15) as r:
             srv = json.loads(r.read(200).decode()).get("serverTime")
         drift = int(time.time() * 1000) - int(srv) if srv else None
         step("server_time", True, f"serverTime={srv} drift={drift} ms (reject >60000 ms)")
@@ -204,15 +207,33 @@ def run(key: str = "", secret: str = "") -> dict:
             "funding_rate": t.get("funding_rate"),
         })
     rows.sort(key=lambda r: -r["quote_vol_24h"])
+    by_sym = {r["symbol"]: r for r in rows}
 
     # ---- 5. COVERAGE vs OUR universe ----
     ours = _load_ours()
     present = sorted(ours & set(pairs))
     missing = sorted(ours - set(pairs))
+    fees = {}
+    for sx in present:
+        r0 = str(inst.get(sx, {}).get("taker_fee_rate", ""))
+        fees[r0] = fees.get(r0, 0) + 1
+    mins = sorted(
+        float(inst[sx]["min_base_quantity"]) * float(by_sym[sx]["last_price"])
+        for sx in present
+        if sx in by_sym and inst.get(sx, {}).get("min_base_quantity")
+        and _f(by_sym[sx]["last_price"])
+    )
+    our_spreads = [by_sym[sx]["spread_bps"] for sx in present
+                   if sx in by_sym and by_sym[sx]["spread_bps"] is not None]
     cov = {"our_symbols": len(ours), "present": len(present),
+           "taker_fee_mix": fees,
+           "min_order_usd": ({"median": round(statistics.median(mins), 2),
+                              "max": round(max(mins), 2)} if mins else None),
+           "our_spreads_bps": ({"median": round(statistics.median(our_spreads), 2),
+                                "above_10bps": sum(1 for x in our_spreads if x > 10),
+                                "n": len(our_spreads)} if our_spreads else None),
            "coverage_pct": round(100 * len(present) / len(ours), 1) if ours else None,
            "missing_count": len(missing)}
-    by_sym = {r["symbol"]: r for r in rows}
     our_liquidity = [dict(sym=s, **{k: by_sym[s][k] for k in
                                     ("quote_vol_24h", "spread_bps", "open_interest")})
                      for s in present if s in by_sym]
@@ -221,8 +242,14 @@ def run(key: str = "", secret: str = "") -> dict:
     spreads = [r["spread_bps"] for r in rows if r["spread_bps"] is not None]
     vol = [r["quote_vol_24h"] for r in rows if r["quote_vol_24h"] > 0]
 
+    tradable = {s: v for s, v in inst.items()
+                if str(v.get("status", "")).upper() == "TRADING"}
+    ticker_only = sorted(set(pairs) - set(inst))
     rep.update({
-        "count_perpetual_pairs": len(pairs),
+        "count_tradable_perpetual_futures": len(tradable),
+        "count_ticker_symbols": len(pairs),
+        "ticker_only_symbols": ticker_only,        # quoted but has NO instrument definition
+        "count_perpetual_pairs": len(tradable) or len(pairs),
         "count_instruments": len(inst),
         "count_hft_instruments": hft_n,
         "coverage_vs_our_universe": cov,
@@ -249,6 +276,13 @@ def run(key: str = "", secret: str = "") -> dict:
     except Exception as e:
         rep["persist_error"] = str(e)
     return rep
+
+
+def _f(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _spread_bps(bid, ask):

@@ -1,0 +1,346 @@
+{
+ "ran_at": "2026-09-19T11:35:33.574815+00:00",
+ "base_url": "https://coinswitch.co",
+ "steps": [
+  {
+   "step": "server_time",
+   "ok": false,
+   "detail": "HTTPError: HTTP Error 403: Forbidden"
+  },
+  {
+   "step": "instrument_info",
+   "ok": true,
+   "detail": "742 instruments in 1625 ms"
+  },
+  {
+   "step": "all_pairs_ticker",
+   "ok": true,
+   "detail": "746 pairs returned in 1566 ms"
+  },
+  {
+   "step": "hft_instruments",
+   "ok": true,
+   "detail": "500 HFT instruments in 1857 ms"
+  }
+ ],
+ "count_perpetual_pairs": 746,
+ "count_instruments": 742,
+ "count_hft_instruments": 500,
+ "coverage_vs_our_universe": {
+  "our_symbols": 0,
+  "present": 0,
+  "coverage_pct": null,
+  "missing_count": 0
+ },
+ "liquidity": {
+  "median_spread_bps_all_pairs": 9.81,
+  "median_quote_vol_24h_usd": 661585.0,
+  "top20_by_volume": [
+   {
+    "symbol": "BTCUSDT",
+    "last_price": "81220.00",
+    "quote_vol_24h": 5932461213.2157,
+    "best_bid": "81219.90",
+    "best_ask": "81220.00",
+    "spread_bps": 0.01,
+    "open_interest": "57520.155",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "ETHUSDT",
+    "last_price": "2637.24",
+    "quote_vol_24h": 3898826384.7577,
+    "best_bid": "2637.24",
+    "best_ask": "2637.25",
+    "spread_bps": 0.04,
+    "open_interest": "877401.29",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "SOLUSDT",
+    "last_price": "111.840",
+    "quote_vol_24h": 1040988797.42,
+    "best_bid": "111.830",
+    "best_ask": "111.840",
+    "spread_bps": 0.89,
+    "open_interest": "6931593.4",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "ZECUSDT",
+    "last_price": "1535.91",
+    "quote_vol_24h": 792112307.6951,
+    "best_bid": "1535.88",
+    "best_ask": "1535.89",
+    "spread_bps": 0.07,
+    "open_interest": "205743.93",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "XRPUSDT",
+    "last_price": "1.4294",
+    "quote_vol_24h": 614932912.1768,
+    "best_bid": "1.4293",
+    "best_ask": "1.4294",
+    "spread_bps": 0.7,
+    "open_interest": "211064433.8",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "HYPEUSDT",
+    "last_price": "92.040",
+    "quote_vol_24h": 368700942.3746,
+    "best_bid": "92.040",
+    "best_ask": "92.050",
+    "spread_bps": 1.09,
+    "open_interest": "3390167.82",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "NEARUSDT",
+    "last_price": "3.6600",
+    "quote_vol_24h": 354931854.0106,
+    "best_bid": "3.6590",
+    "best_ask": "3.6600",
+    "spread_bps": 2.73,
+    "open_interest": "53006698",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "AKEUSDT",
+    "last_price": "0.0621280",
+    "quote_vol_24h": 264846774.4281,
+    "best_bid": "0.0621150",
+    "best_ask": "0.0621510",
+    "spread_bps": 5.79,
+    "open_interest": "589153600",
+    "funding_rate": -5.346e-05
+   },
+   {
+    "symbol": "ENAUSDT",
+    "last_price": "0.19000",
+    "quote_vol_24h": 171444067.6595,
+    "best_bid": "0.18999",
+    "best_ask": "0.19000",
+    "spread_bps": 0.53,
+    "open_interest": "416582905",
+    "funding_rate": 5e-05
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "last_price": "0.08811",
+    "quote_vol_24h": 141746661.7803,
+    "best_bid": "0.08811",
+    "best_ask": "0.08812",
+    "spread_bps": 1.13,
+    "open_interest": "1490766115",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "UNIUSDT",
+    "last_price": "9.061",
+    "quote_vol_24h": 128501334.6958,
+    "best_bid": "9.060",
+    "best_ask": "9.061",
+    "spread_bps": 1.1,
+    "open_interest": "11561670.4",
+    "funding_rate": 5.931e-05
+   },
+   {
+    "symbol": "ARBUSDT",
+    "last_price": "0.21259",
+    "quote_vol_24h": 123132859.5281,
+    "best_bid": "0.21259",
+    "best_ask": "0.21260",
+    "spread_bps": 0.47,
+    "open_interest": "219922450.7",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "SUIUSDT",
+    "last_price": "0.86440",
+    "quote_vol_24h": 122594703.066,
+    "best_bid": "0.86440",
+    "best_ask": "0.86450",
+    "spread_bps": 1.16,
+    "open_interest": "93626970",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "ADAUSDT",
+    "last_price": "0.2259",
+    "quote_vol_24h": 102594355.7342,
+    "best_bid": "0.2258",
+    "best_ask": "0.2259",
+    "spread_bps": 4.43,
+    "open_interest": "287677365",
+    "funding_rate": 0.0001
+   },
+   {
+    "symbol": "SOXLUSDT",
+    "last_price": "120.29",
+    "quote_vol_24h": 93957972.2142,
+    "best_bid": "120.29",
+    "best_ask": "120.30",
+    "spread_bps": 0.83,
+    "open_interest": "306432.32",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "SNDKUSDT",
+    "last_price": "1784.35",
+    "quote_vol_24h": 92067850.6414,
+    "best_bid": "1784.38",
+    "best_ask": "1784.43",
+    "spread_bps": 0.28,
+    "open_interest": "12026.04",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "1000PEPEUSDT",
+    "last_price": "0.0038190",
+    "quote_vol_24h": 76613978.7611,
+    "best_bid": "0.0038190",
+    "best_ask": "0.0038200",
+    "spread_bps": 2.62,
+    "open_interest": "18200073700",
+    "funding_rate": 8.708e-05
+   },
+   {
+    "symbol": "XAUUSDT",
+    "last_price": "4381.27",
+    "quote_vol_24h": 71082541.2033,
+    "best_bid": "4381.28",
+    "best_ask": "4381.29",
+    "spread_bps": 0.02,
+    "open_interest": "20583.295",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "ONDOUSDT",
+    "last_price": "0.4108",
+    "quote_vol_24h": 70788551.2772,
+    "best_bid": "0.4108",
+    "best_ask": "0.4109",
+    "spread_bps": 2.43,
+    "open_interest": "147577140",
+    "funding_rate": 5e-05
+   },
+   {
+    "symbol": "XMRUSDT",
+    "last_price": "588.50",
+    "quote_vol_24h": 66679838.569,
+    "best_bid": "588.50",
+    "best_ask": "588.51",
+    "spread_bps": 0.17,
+    "open_interest": "83853.6",
+    "funding_rate": 0.00029545
+   }
+  ],
+  "bottom10_by_volume": [
+   {
+    "symbol": "YOFCUSDT",
+    "last_price": "23.25",
+    "quote_vol_24h": 5828.7773,
+    "best_bid": "23.25",
+    "best_ask": "23.33",
+    "spread_bps": 34.35,
+    "open_interest": "1112.56",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "MOUSDT",
+    "last_price": "69.62",
+    "quote_vol_24h": 5193.0895,
+    "best_bid": "69.62",
+    "best_ask": "69.73",
+    "spread_bps": 15.79,
+    "open_interest": "567.1",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "HORIZONUSDT",
+    "last_price": "0.5056",
+    "quote_vol_24h": 4761.4064,
+    "best_bid": "0.5056",
+    "best_ask": "0.5075",
+    "spread_bps": 37.51,
+    "open_interest": "230832",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "SENSETIMEUSDT",
+    "last_price": "0.1642",
+    "quote_vol_24h": 4369.4489,
+    "best_bid": "0.1642",
+    "best_ask": "0.1647",
+    "spread_bps": 30.4,
+    "open_interest": "279746",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "KODEX200USDT",
+    "last_price": "78.15",
+    "quote_vol_24h": 4169.9314,
+    "best_bid": "77.84",
+    "best_ask": "78.08",
+    "spread_bps": 30.79,
+    "open_interest": "397.54",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "AALUSDT",
+    "last_price": "13.08",
+    "quote_vol_24h": 3938.3298,
+    "best_bid": "13.04",
+    "best_ask": "13.09",
+    "spread_bps": 38.27,
+    "open_interest": "4510.34",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "POPMARTUSDT",
+    "last_price": "19.93",
+    "quote_vol_24h": 2416.8572,
+    "best_bid": "19.89",
+    "best_ask": "19.96",
+    "spread_bps": 35.13,
+    "open_interest": "2916.28",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "MEITUANUSDT",
+    "last_price": "9.39",
+    "quote_vol_24h": 1956.509,
+    "best_bid": "9.35",
+    "best_ask": "9.39",
+    "spread_bps": 42.69,
+    "open_interest": "4759.98",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "HUAHONGUSDT",
+    "last_price": "14.69",
+    "quote_vol_24h": 672.2136,
+    "best_bid": "14.63",
+    "best_ask": "14.69",
+    "spread_bps": 40.93,
+    "open_interest": "6555.16",
+    "funding_rate": 0
+   },
+   {
+    "symbol": "ICXUSDT",
+    "last_price": "0.01001",
+    "quote_vol_24h": 0.0,
+    "best_bid": "",
+    "best_ask": "",
+    "spread_bps": null,
+    "open_interest": "0",
+    "funding_rate": 0
+   }
+  ],
+  "our_symbols_ranked": []
+ },
+ "missing_examples": [],
+ "verdict": "OK"
+}
